@@ -43,6 +43,7 @@ type AppPreferences = {
   language?: Language;
   launchAtStartup?: boolean;
   autoToTray?: boolean;
+  startupPreferenceVersion?: number;
 };
 
 const queue: ShotItem[] = [];
@@ -61,6 +62,8 @@ let screenshotPoller: NodeJS.Timeout | null = null;
 let preferencesLoaded = false;
 let quitting = false;
 
+const startupPreferenceVersion = 1;
+
 function getScreenshotsDir() {
   return join(app.getPath('pictures'), 'Screenshots');
 }
@@ -78,7 +81,7 @@ function getStartupShortcutPath() {
 }
 
 function getExecutablePath() {
-  return app.getPath('exe');
+  return process.env.PORTABLE_EXECUTABLE_FILE ?? app.getPath('exe');
 }
 
 function getWindowIconPath() {
@@ -152,7 +155,7 @@ async function primeScreenshotIndex() {
 
 async function loadPreferences() {
   try {
-    const raw = await readFile(getPreferencesPath(), 'utf8');
+    const raw = (await readFile(getPreferencesPath(), 'utf8')).replace(/^\uFEFF/, '');
     const parsed = JSON.parse(raw) as AppPreferences;
     if (parsed.afterPasteBehavior === 'keep' || parsed.afterPasteBehavior === 'clear') {
       afterPasteBehavior = parsed.afterPasteBehavior;
@@ -160,7 +163,9 @@ async function loadPreferences() {
     if (parsed.language === 'zh-TW' || parsed.language === 'en') {
       language = parsed.language;
     }
-    if (typeof parsed.launchAtStartup === 'boolean') {
+    if (parsed.startupPreferenceVersion !== startupPreferenceVersion) {
+      launchAtStartup = false;
+    } else if (typeof parsed.launchAtStartup === 'boolean') {
       launchAtStartup = parsed.launchAtStartup;
     }
     if (typeof parsed.autoToTray === 'boolean') {
@@ -189,7 +194,8 @@ async function savePreferences() {
         afterPasteBehavior,
         language,
         launchAtStartup,
-        autoToTray
+        autoToTray,
+        startupPreferenceVersion
       } satisfies AppPreferences,
       null,
       2
