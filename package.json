@@ -1,0 +1,20 @@
+{
+  "name": "shottray",
+  "productName": "ShotTray",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Windows desktop app for collecting screenshots and pasting them into other apps.",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "electron": "^37.10.3",
+    "electron-vite": "^4.0.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.2"
+  }
+}
