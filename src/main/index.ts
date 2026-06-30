@@ -63,6 +63,7 @@ let preferencesLoaded = false;
 let quitting = false;
 
 const startupPreferenceVersion = 1;
+const startInTray = process.argv.includes('--start-in-tray');
 
 function getScreenshotsDir() {
   return join(app.getPath('pictures'), 'Screenshots');
@@ -208,7 +209,7 @@ async function ensureStartupShortcut() {
   await mkdir(getStartupFolder(), { recursive: true });
   await writeFile(
     getStartupShortcutPath(),
-    `@echo off\r\nstart "" "${getExecutablePath()}"\r\n`,
+    `@echo off\r\nstart "" "${getExecutablePath()}" --start-in-tray\r\n`,
     'utf8'
   );
 }
@@ -633,99 +634,101 @@ if (!singleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
-  await loadPreferences();
-  await syncStartupShortcut();
-  createWindow();
-  createTray();
-
-  ipcMain.handle('capture-screenshot', async () => {
-    return captureFromClipboard();
-  });
-
-  ipcMain.handle('paste-all', async () => {
-    await pasteAllImages();
-    return true;
-  });
-
-  ipcMain.handle('clear-queue', async () => {
-    const items = [...queue];
-    await deleteFilesForItems(items);
-    queue.length = 0;
-    collecting = false;
-    activeBatch = null;
-    exportBatch = null;
-    sendState();
-    return true;
-  });
-
-  ipcMain.handle('delete-batch', async (_event, batch: number) => deleteBatch(batch));
-
-  ipcMain.handle('set-export-batch', async (_event, batch: number | null) => {
-    exportBatch = batch;
-    sendState();
-    return true;
-  });
-
-  ipcMain.handle('set-after-paste-behavior', async (_event, behavior: AfterPasteBehavior) => {
-    afterPasteBehavior = behavior;
-    void savePreferences();
-    sendState();
-    return true;
-  });
-
-  ipcMain.handle('set-language', async (_event, nextLanguage: Language) => {
-    language = nextLanguage;
-    void savePreferences();
-    sendState();
-    return true;
-  });
-
-  ipcMain.handle('set-launch-at-startup', async (_event, enabled: boolean) => {
-    launchAtStartup = enabled;
+    await loadPreferences();
     await syncStartupShortcut();
-    void savePreferences();
+    createTray();
+    if (!startInTray) {
+      createWindow();
+    }
+
+    ipcMain.handle('capture-screenshot', async () => {
+      return captureFromClipboard();
+    });
+
+    ipcMain.handle('paste-all', async () => {
+      await pasteAllImages();
+      return true;
+    });
+
+    ipcMain.handle('clear-queue', async () => {
+      const items = [...queue];
+      await deleteFilesForItems(items);
+      queue.length = 0;
+      collecting = false;
+      activeBatch = null;
+      exportBatch = null;
+      sendState();
+      return true;
+    });
+
+    ipcMain.handle('delete-batch', async (_event, batch: number) => deleteBatch(batch));
+
+    ipcMain.handle('set-export-batch', async (_event, batch: number | null) => {
+      exportBatch = batch;
+      sendState();
+      return true;
+    });
+
+    ipcMain.handle('set-after-paste-behavior', async (_event, behavior: AfterPasteBehavior) => {
+      afterPasteBehavior = behavior;
+      void savePreferences();
+      sendState();
+      return true;
+    });
+
+    ipcMain.handle('set-language', async (_event, nextLanguage: Language) => {
+      language = nextLanguage;
+      void savePreferences();
+      sendState();
+      return true;
+    });
+
+    ipcMain.handle('set-launch-at-startup', async (_event, enabled: boolean) => {
+      launchAtStartup = enabled;
+      await syncStartupShortcut();
+      void savePreferences();
+      sendState();
+      return true;
+    });
+
+    ipcMain.handle('set-auto-to-tray', async (_event, enabled: boolean) => {
+      autoToTray = enabled;
+      void savePreferences();
+      sendState();
+      return true;
+    });
+
+    ipcMain.handle('clear-export-batch', async () => {
+      exportBatch = null;
+      sendState();
+      return true;
+    });
+
+    ipcMain.handle('get-state', async () => ({
+      collecting,
+      activeBatch,
+      exportBatch,
+      afterPasteBehavior,
+      language,
+      launchAtStartup,
+      autoToTray,
+      queue
+    }));
+
+    globalShortcut.register('Alt+Shift+S', () => {
+      void captureFromClipboard();
+    });
+
+    globalShortcut.register('Alt+Shift+V', () => {
+      void pasteAllImages();
+    });
+
     sendState();
-    return true;
-  });
 
-  ipcMain.handle('set-auto-to-tray', async (_event, enabled: boolean) => {
-    autoToTray = enabled;
-    void savePreferences();
-    sendState();
-    return true;
-  });
-
-  ipcMain.handle('clear-export-batch', async () => {
-    exportBatch = null;
-    sendState();
-    return true;
-  });
-
-  ipcMain.handle('get-state', async () => ({
-    collecting,
-    activeBatch,
-    exportBatch,
-    afterPasteBehavior,
-    language,
-    launchAtStartup,
-    autoToTray,
-    queue
-  }));
-
-  globalShortcut.register('Alt+Shift+S', () => {
-    void captureFromClipboard();
-  });
-
-  globalShortcut.register('Alt+Shift+V', () => {
-    void pasteAllImages();
-  });
-
-  sendState();
-
-  void primeScreenshotIndex();
-  screenshotPoller = setInterval(() => {
-    void scanScreenshotFolder();
-  }, 120);
+    void primeScreenshotIndex();
+    screenshotPoller = setInterval(() => {
+      void scanScreenshotFolder();
+    }, 120);
   });
 }
 
@@ -734,7 +737,7 @@ app.on('before-quit', () => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin' && !autoToTray) {
+  if (process.platform !== 'darwin' && !autoToTray && !startInTray) {
     app.quit();
   }
 });
