@@ -1,34 +1,68 @@
 # ShotTray
 
-Windows desktop app for collecting multiple screenshots into numbered batches and pasting them into another app in one burst.
+ShotTray 是一個 Windows 桌面工具，用來連續蒐集多張截圖，並在需要時一次貼到其他 App。
 
-## Stack
+適合需要把多張錯誤畫面、操作步驟、聊天截圖或資料截圖一次丟給 AI、客服、文件、Issue 或聊天工具的人。
 
-- Electron
-- TypeScript
-- Windows built-in screenshot clip flow
+## 下載
 
-## Dev
+到 GitHub Releases 下載最新版：
+
+https://github.com/ChuangHoward902/shottray/releases
+
+下載 `ShotTray-0.1.0-win.exe` 後直接執行即可。
+
+## 功能
+
+- 用 `Alt + Shift + S` 開始或繼續蒐集截圖
+- 用 `Alt + Shift + V` 停止蒐集，並把目前批次一次貼上
+- 每次開始到貼上之間的截圖會自動分成一組
+- 可以選擇保留截圖，或貼上後刪除 Windows Screenshots 資料夾中的圖片
+- 支援繁體中文與 English
+- 支援開機啟動
+- 支援最小化到系統列
+- 系統列右鍵可開始或停止蒐集
+
+## 快捷鍵
+
+| 快捷鍵 | 功能 |
+| --- | --- |
+| `Alt + Shift + S` | 開啟 Windows 截圖流程並開始蒐集 |
+| `Alt + Shift + V` | 停止蒐集並貼上選取批次或目前批次 |
+
+## 使用方式
+
+1. 執行 ShotTray
+2. 按 `Alt + Shift + S` 截圖
+3. 需要多張時，繼續按 `Alt + Shift + S`
+4. 回到要貼上的 App
+5. 按 `Alt + Shift + V` 一次貼上目前批次
+
+## 開發
 
 ```bash
 npm install
 npm run dev
 ```
 
-On Windows you can also double-click `run-dev.bat` to start it without using PowerShell.
+在 Windows 上也可以直接執行 `run-dev.bat`。
 
-## Shortcuts
+## 打包
 
-- `Alt + Shift + S`: start or continue the current batch and open the screenshot flow
-- `Alt + Shift + V`: paste the prepared batch or the current batch into the active app
-- `貼上後處理`: choose whether the app keeps the Screenshots images or deletes the folder images after paste
+```bash
+npm run dist
+```
 
-Each run between `Alt + Shift + S` and `Alt + Shift + V` becomes one numbered batch: `1`, `2`, `3`, and so on.
+打包後的 exe 會輸出到 `release/ShotTray-0.1.0-win.exe`。
 
-Workflow:
+## 技術
 
-1. Press `Alt + Shift + S`
-2. Take screenshots as needed for that batch
-3. Optionally click `選這組貼上` on a batch if you want to paste that group later
-4. Pick whether pasted images should stay in the Screenshots list or delete the folder images after paste
-5. Press `Alt + Shift + V` to stop collecting and paste the selected or current batch
+- Electron
+- TypeScript
+- electron-vite
+- electron-builder
+- Windows 內建截圖流程
+
+## 授權
+
+MIT License
