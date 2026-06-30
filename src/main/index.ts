@@ -396,6 +396,10 @@ function showWindow() {
     createWindow();
   }
 
+  if (mainWindow?.isMinimized()) {
+    mainWindow.restore();
+  }
+
   mainWindow?.show();
   mainWindow?.focus();
 }
@@ -613,7 +617,16 @@ async function pasteAllImages() {
   }
 }
 
-app.whenReady().then(async () => {
+const singleInstanceLock = app.requestSingleInstanceLock();
+
+if (!singleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    showWindow();
+  });
+
+  app.whenReady().then(async () => {
   await loadPreferences();
   await syncStartupShortcut();
   createWindow();
@@ -707,7 +720,8 @@ app.whenReady().then(async () => {
   screenshotPoller = setInterval(() => {
     void scanScreenshotFolder();
   }, 120);
-});
+  });
+}
 
 app.on('before-quit', () => {
   quitting = true;

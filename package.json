@@ -8,13 +8,39 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "dist": "npm run build && electron-builder --win portable",
     "preview": "electron-vite preview"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
     "electron": "^37.10.3",
     "electron-vite": "^4.0.0",
+    "electron-builder": "^26.0.12",
     "typescript": "^5.9.2",
     "vite": "^7.1.2"
+  },
+  "build": {
+    "appId": "com.chuanghoward.shottray",
+    "productName": "ShotTray",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "assets/**",
+      "package.json"
+    ],
+    "extraMetadata": {
+      "main": "dist/main/index.js"
+    },
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "icon": "assets/shottray.ico"
+    },
+    "portable": {
+      "artifactName": "ShotTray-${version}-win.${ext}"
+    }
   }
 }
