@@ -2,7 +2,7 @@ import './style.css';
 
 type QueueItem = {
   id: string;
-  dataUrl: string;
+  thumbnailUrl: string;
   width: number;
   height: number;
   createdAt: number;
@@ -20,6 +20,7 @@ type AppState = {
   language: Language;
   launchAtStartup: boolean;
   autoToTray: boolean;
+  unavailableHotkeys: string[];
   queue: QueueItem[];
 };
 
@@ -34,6 +35,7 @@ const state: AppState = {
   language: 'zh-TW',
   launchAtStartup: false,
   autoToTray: false,
+  unavailableHotkeys: [],
   queue: []
 };
 
@@ -74,6 +76,7 @@ const copy = {
     batchPrefix: '第',
     batchSuffix: '組',
     selectedBadge: '已選第 {batch} 組',
+    hotkeyTaken: '快捷鍵 {keys} 已被其他程式占用，暫時無法使用。請關掉占用它的程式後重新開啟 ShotTray。',
     boot: 'preload bridge 沒有掛上，請確認 Electron 視窗是用目前這份程式啟動。',
     loadFail: '讀取初始狀態失敗，但 UI 已經載入。'
   },
@@ -111,6 +114,7 @@ const copy = {
     batchPrefix: 'Batch',
     batchSuffix: '',
     selectedBadge: 'Selected batch {batch}',
+    hotkeyTaken: 'The hotkey {keys} is already used by another program and does not work. Close that program and restart ShotTray.',
     boot: 'The preload bridge is missing. Please make sure the Electron window was launched from this project.',
     loadFail: 'Failed to read the initial state, but the UI is already loaded.'
   }
@@ -134,7 +138,8 @@ function escapeHtml(value: string) {
 function groupBatches() {
   const map = new Map<number, QueueItem[]>();
 
-  for (const item of state.queue) {
+  // The queue is newest first; within a batch, show the shots in the order they were taken (the paste order).
+  for (const item of [...state.queue].reverse()) {
     const shots = map.get(item.batch) ?? [];
     shots.push(item);
     map.set(item.batch, shots);
@@ -215,7 +220,7 @@ function renderBatchSection(batch: number, shots: QueueItem[], selected: boolean
     .map(
       (item) => `
         <article class="shot-card">
-          <img src="${item.dataUrl}" alt="screenshot" />
+          <img src="${item.thumbnailUrl}" alt="screenshot" />
           <div class="shot-meta">
             <div class="shot-meta-row">
               <span>${item.width} × ${item.height}</span>
@@ -286,6 +291,12 @@ function render() {
             ${hasSelection ? `<span class="status-pill subtle">${escapeHtml(selectedLabel)}</span>` : ''}
           </div>
         </div>
+
+        ${
+          state.unavailableHotkeys.length
+            ? `<div class="boot-banner">${escapeHtml(t('hotkeyTaken').replace('{keys}', state.unavailableHotkeys.join(state.language === 'zh-TW' ? '、' : ', ')))}</div>`
+            : ''
+        }
 
         ${renderShortcutCards()}
 
@@ -416,6 +427,7 @@ function syncFromState(nextState: AppState) {
   state.language = nextState.language;
   state.launchAtStartup = nextState.launchAtStartup;
   state.autoToTray = nextState.autoToTray;
+  state.unavailableHotkeys = nextState.unavailableHotkeys ?? [];
   state.queue = nextState.queue;
   bootMessage = '';
   render();

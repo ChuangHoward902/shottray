@@ -6,8 +6,11 @@ import {
   ipcMain,
   nativeImage,
   Menu,
+  screen,
+  shell,
   Tray
 } from 'electron';
+import type { NativeImage } from 'electron';
 import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
@@ -17,12 +20,17 @@ import { join, resolve, sep } from 'node:path';
 type ShotItem = {
   id: string;
   filePath: string;
-  dataUrl: string;
+  // The screenshot file as saved; pasting uses this copy, so it still works after the file is gone.
+  png: Buffer;
+  // A small preview for the window. Full-size images are never sent to it.
+  thumbnailUrl: string;
   width: number;
   height: number;
   createdAt: number;
   batch: number;
 };
+
+type QueueItemView = Pick<ShotItem, 'id' | 'thumbnailUrl' | 'width' | 'height' | 'createdAt' | 'batch'>;
 
 type AfterPasteBehavior = 'keep' | 'clear';
 type Language = 'zh-TW' | 'en';
@@ -35,7 +43,8 @@ type AppState = {
   language: Language;
   launchAtStartup: boolean;
   autoToTray: boolean;
-  queue: ShotItem[];
+  unavailableHotkeys: string[];
+  queue: QueueItemView[];
 };
 
 type AppPreferences = {
@@ -46,6 +55,14 @@ type AppPreferences = {
   startupPreferenceVersion?: number;
 };
 
+type SavedClipboard = {
+  text: string;
+  html: string;
+  rtf: string;
+  image: NativeImage | null;
+};
+
+// Newest first.
 const queue: ShotItem[] = [];
 let collecting = false;
 let activeBatch: number | null = null;
@@ -61,9 +78,11 @@ let pasting = false;
 let screenshotPoller: NodeJS.Timeout | null = null;
 let preferencesLoaded = false;
 let quitting = false;
+const unavailableHotkeys: string[] = [];
 
 const startupPreferenceVersion = 1;
 const startInTray = process.argv.includes('--start-in-tray');
+const thumbnailWidth = 480;
 
 function getScreenshotsDir() {
   return join(app.getPath('pictures'), 'Screenshots');
@@ -93,13 +112,11 @@ function getTrayIconPath() {
   return getWindowIconPath();
 }
 
-type ManagedScreenshotFile = {
-  filePath: string;
-  mtimeMs: number;
-  size: number;
-};
-
-const knownScreenshotFiles = new Map<string, string>();
+// Names of the screenshots that were already in the folder when the current batch started.
+// Anything else that shows up while collecting is new.
+const knownScreenshotFiles = new Set<string>();
+let screenshotIndexReady: Promise<void> = Promise.resolve();
+let scanning = false;
 
 function isManagedScreenshotFile(filePath: string) {
   const screenshotsRoot = resolve(getScreenshotsDir()) + sep;
@@ -107,56 +124,22 @@ function isManagedScreenshotFile(filePath: string) {
   return resolvedPath.startsWith(screenshotsRoot);
 }
 
-async function listManagedScreenshotFiles() {
-  try {
-    const names = await readdir(getScreenshotsDir());
-    const files = await Promise.all(
-      names
-        .filter((name) => name.toLowerCase().endsWith('.png'))
-        .map(async (name) => {
-          const filePath = join(getScreenshotsDir(), name);
-          const info = await stat(filePath);
-          return { filePath, mtimeMs: info.mtimeMs, size: info.size };
-        })
-    );
-
-    return files;
-  } catch {
-    return [];
-  }
-}
-
-function fileSignature(file: ManagedScreenshotFile) {
-  return `${file.mtimeMs}:${file.size}`;
-}
-
-async function snapshotScreenshotFiles() {
+async function listScreenshotNames() {
   const names = await readdir(getScreenshotsDir());
-  const files = await Promise.all(
-    names
-      .filter((name) => name.toLowerCase().endsWith('.png'))
-      .map(async (name) => {
-        const filePath = join(getScreenshotsDir(), name);
-        const info = await stat(filePath);
-        return { filePath, mtimeMs: info.mtimeMs, size: info.size };
-      })
-  );
-
-  files.sort((left, right) => left.mtimeMs - right.mtimeMs);
-  return files;
+  return names.filter((name) => name.toLowerCase().endsWith('.png'));
 }
 
 async function primeScreenshotIndex() {
+  const names = await listScreenshotNames().catch(() => [] as string[]);
   knownScreenshotFiles.clear();
-  const files = await snapshotScreenshotFiles().catch(() => []);
-  for (const file of files) {
-    knownScreenshotFiles.set(file.filePath, fileSignature(file));
+  for (const name of names) {
+    knownScreenshotFiles.add(name);
   }
 }
 
 async function loadPreferences() {
   try {
-    const raw = (await readFile(getPreferencesPath(), 'utf8')).replace(/^\uFEFF/, '');
+    const raw = (await readFile(getPreferencesPath(), 'utf8')).replace(/^﻿/, '');
     const parsed = JSON.parse(raw) as AppPreferences;
     if (parsed.afterPasteBehavior === 'keep' || parsed.afterPasteBehavior === 'clear') {
       afterPasteBehavior = parsed.afterPasteBehavior;
@@ -205,6 +188,10 @@ async function savePreferences() {
   );
 }
 
+function persistPreferences() {
+  savePreferences().catch((error) => console.error('Could not save preferences:', error));
+}
+
 async function ensureStartupShortcut() {
   await mkdir(getStartupFolder(), { recursive: true });
   await writeFile(
@@ -228,37 +215,51 @@ async function syncStartupShortcut() {
 }
 
 async function scanScreenshotFolder() {
-  if (!collecting) {
+  if (!collecting || scanning) {
     return;
   }
 
-  const files = await snapshotScreenshotFiles().catch(() => []);
-  const seen = new Set<string>();
-
-  for (const file of files) {
-    seen.add(file.filePath);
-    const signature = fileSignature(file);
-    const previous = knownScreenshotFiles.get(file.filePath);
-
-    if (previous === signature) {
-      continue;
+  scanning = true;
+  try {
+    await screenshotIndexReady;
+    const names = await listScreenshotNames().catch(() => null);
+    if (!names) {
+      return;
     }
 
-    const accepted = await enqueueScreenshotFile(file.filePath);
-    if (accepted) {
-      knownScreenshotFiles.set(file.filePath, signature);
+    const present = new Set(names);
+    for (const name of Array.from(knownScreenshotFiles)) {
+      if (!present.has(name)) {
+        knownScreenshotFiles.delete(name);
+      }
     }
-  }
 
-  for (const filePath of Array.from(knownScreenshotFiles.keys())) {
-    if (!seen.has(filePath)) {
-      knownScreenshotFiles.delete(filePath);
+    // Only new names are looked at, so a screenshot that is saved again (say after editing) is not collected twice.
+    const fresh = await Promise.all(
+      names
+        .filter((name) => !knownScreenshotFiles.has(name))
+        .map(async (name) => {
+          const filePath = join(getScreenshotsDir(), name);
+          const info = await stat(filePath).catch(() => null);
+          return info ? { name, filePath, mtimeMs: info.mtimeMs } : null;
+        })
+    );
+
+    const newFiles = fresh.filter((file): file is NonNullable<typeof file> => file !== null);
+    newFiles.sort((left, right) => left.mtimeMs - right.mtimeMs);
+    for (const file of newFiles) {
+      // A file that is still being written cannot be read as an image yet; the next scan tries it again.
+      if (await enqueueScreenshotFile(file.filePath)) {
+        knownScreenshotFiles.add(file.name);
+      }
     }
+  } finally {
+    scanning = false;
   }
 }
 
-function sendState() {
-  const state: AppState = {
+function currentState(): AppState {
+  return {
     collecting,
     activeBatch,
     exportBatch,
@@ -266,18 +267,30 @@ function sendState() {
     language,
     launchAtStartup,
     autoToTray,
-    queue
+    unavailableHotkeys,
+    queue: queue.map(({ id, thumbnailUrl, width, height, createdAt, batch }) => ({
+      id,
+      thumbnailUrl,
+      width,
+      height,
+      createdAt,
+      batch
+    }))
   };
+}
 
-  mainWindow?.webContents.send('state-updated', state);
+function sendState() {
+  mainWindow?.webContents.send('state-updated', currentState());
   updateTrayMenu();
 }
 
 function createWindow() {
   Menu.setApplicationMenu(null);
+  // Never taller or wider than the screen (small laptops, 150% scaling); the page scrolls.
+  const workArea = screen.getPrimaryDisplay().workAreaSize;
   mainWindow = new BrowserWindow({
-    width: 1220,
-    height: 820,
+    width: Math.min(1220, workArea.width),
+    height: Math.min(820, workArea.height),
     resizable: false,
     maximizable: false,
     fullscreenable: false,
@@ -437,7 +450,7 @@ function triggerSnippingTool() {
   const script = `Start-Process 'ms-screenclip:'`;
   spawn('powershell.exe', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', script], {
     windowsHide: true
-  });
+  }).on('error', (error) => console.error('Could not open the snipping tool:', error));
 }
 
 function startCollecting() {
@@ -447,6 +460,8 @@ function startCollecting() {
 
   collecting = true;
   activeBatch = nextBatchNumber++;
+  // Screenshots already in the folder, including ones taken while ShotTray was idle, are not part of the new batch.
+  screenshotIndexReady = primeScreenshotIndex();
   sendState();
 }
 
@@ -460,69 +475,84 @@ function stopCollecting() {
   sendState();
 }
 
-function readClipboardSignature() {
-  const image = clipboard.readImage();
-  return image.isEmpty() ? '' : image.toDataURL();
+function makeThumbnail(image: NativeImage) {
+  const { width } = image.getSize();
+  const preview = width > thumbnailWidth ? image.resize({ width: thumbnailWidth, quality: 'good' }) : image;
+  return preview.toDataURL();
 }
 
 async function enqueueScreenshotFile(filePath: string) {
-  const image = nativeImage.createFromPath(filePath);
+  const png = await readFile(filePath).catch(() => null);
+  if (!png || !collecting || activeBatch === null) {
+    return false;
+  }
+
+  const image = nativeImage.createFromBuffer(png);
   if (image.isEmpty()) {
     return false;
   }
 
-  const batch = activeBatch ?? nextBatchNumber++;
-  const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  if (activeBatch === null) {
-    activeBatch = batch;
-    collecting = true;
-  }
-
   const { width, height } = image.getSize();
   queue.unshift({
-    id,
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     filePath,
-    dataUrl: image.toDataURL(),
+    png,
+    thumbnailUrl: makeThumbnail(image),
     width,
     height,
     createdAt: Date.now(),
-    batch
+    batch: activeBatch
   });
 
   sendState();
   return true;
 }
 
-async function captureFromClipboard() {
+async function startCapture() {
   startCollecting();
   triggerSnippingTool();
   return true;
 }
 
-async function deleteFilesForItems(items: ShotItem[]) {
+// "Delete after paste" moves the batch's screenshots to the Recycle Bin, so a mistake can be undone.
+async function moveFilesToTrash(items: ShotItem[]) {
   await Promise.all(
-    items.filter((item) => isManagedScreenshotFile(item.filePath)).map((item) => rm(item.filePath, { force: true }))
+    items
+      .filter((item) => isManagedScreenshotFile(item.filePath) && existsSync(item.filePath))
+      .map((item) => shell.trashItem(item.filePath).catch((error) => console.error('Could not move to the Recycle Bin:', error)))
   );
 }
 
+// Waits until the Alt and Shift of the paste hotkey are let go, presses Ctrl+V, and resolves once PowerShell has
+// finished, so the next screenshot is never put on the clipboard before this one has been pasted.
 function sendCtrlV() {
   const script = `
 Add-Type -AssemblyName System.Windows.Forms
+$deadline = (Get-Date).AddSeconds(2)
+while ([System.Windows.Forms.Control]::ModifierKeys -ne 'None' -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 20 }
 [System.Windows.Forms.SendKeys]::SendWait("^v")
 `;
 
-  spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
-    windowsHide: true
+  return new Promise<void>((done) => {
+    const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+      windowsHide: true
+    });
+    const timer = setTimeout(finish, 10_000);
+    function finish() {
+      clearTimeout(timer);
+      done();
+    }
+    child.once('exit', finish);
+    child.once('error', finish);
   });
 }
 
-async function waitForClipboardImage(dataUrl: string) {
-  const expectedSize = nativeImage.createFromDataURL(dataUrl).getSize();
+async function waitForClipboardImage(width: number, height: number) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < 2000) {
     const image = clipboard.readImage();
     const size = image.getSize();
-    if (!image.isEmpty() && size.width === expectedSize.width && size.height === expectedSize.height) {
+    if (!image.isEmpty() && size.width === width && size.height === height) {
       return true;
     }
 
@@ -532,27 +562,49 @@ async function waitForClipboardImage(dataUrl: string) {
   return false;
 }
 
-function getShotsToPaste() {
-  if (exportBatch !== null) {
-    return queue.filter((item) => item.batch === exportBatch);
-  }
-
-  if (activeBatch !== null) {
-    return queue.filter((item) => item.batch === activeBatch);
-  }
-
-  const latestBatch = queue[0]?.batch ?? null;
-  if (latestBatch !== null) {
-    return queue.filter((item) => item.batch === latestBatch);
-  }
-
-  return [];
+function saveClipboard(): SavedClipboard {
+  const image = clipboard.readImage();
+  return {
+    text: clipboard.readText(),
+    html: clipboard.readHTML(),
+    rtf: clipboard.readRTF(),
+    image: image.isEmpty() ? null : image
+  };
 }
 
-async function deleteBatch(batch: number) {
-  const items = queue.filter((item) => item.batch === batch);
-  await deleteFilesForItems(items);
+// Puts back what the user had copied before the paste (text, formatted text or an image).
+function restoreClipboard(saved: SavedClipboard) {
+  const data: Parameters<typeof clipboard.write>[0] = {};
+  if (saved.text) {
+    data.text = saved.text;
+  }
+  if (saved.html) {
+    data.html = saved.html;
+  }
+  if (saved.rtf) {
+    data.rtf = saved.rtf;
+  }
+  if (saved.image) {
+    data.image = saved.image;
+  }
 
+  if (Object.keys(data).length > 0) {
+    clipboard.write(data);
+  } else {
+    clipboard.clear();
+  }
+}
+
+function getBatchToPaste() {
+  return exportBatch ?? activeBatch ?? queue[0]?.batch ?? null;
+}
+
+// The queue is newest first; screenshots are pasted in the order they were taken.
+function shotsInPasteOrder(batch: number) {
+  return queue.filter((item) => item.batch === batch).reverse();
+}
+
+function deleteBatch(batch: number) {
   const originalLength = queue.length;
   for (let index = queue.length - 1; index >= 0; index -= 1) {
     if (queue[index]?.batch === batch) {
@@ -590,8 +642,8 @@ async function pasteAllImages() {
 
   pasting = true;
 
-  const shots = getShotsToPaste();
-  const targetBatch = shots[0]?.batch ?? null;
+  const batch = getBatchToPaste();
+  const shots = batch === null ? [] : shotsInPasteOrder(batch);
 
   try {
     collecting = false;
@@ -604,16 +656,19 @@ async function pasteAllImages() {
       return false;
     }
 
+    const savedClipboard = saveClipboard();
     for (const item of shots) {
-      clipboard.writeImage(nativeImage.createFromDataURL(item.dataUrl));
-      await waitForClipboardImage(item.dataUrl);
+      clipboard.writeImage(nativeImage.createFromBuffer(item.png));
+      await waitForClipboardImage(item.width, item.height);
       await delay(180);
-      sendCtrlV();
-      await delay(900);
+      await sendCtrlV();
+      // The target app may read the clipboard a moment after the key press.
+      await delay(400);
     }
+    restoreClipboard(savedClipboard);
 
-    if (afterPasteBehavior === 'clear' && targetBatch !== null) {
-      await deleteFilesForItems(shots);
+    if (afterPasteBehavior === 'clear') {
+      await moveFilesToTrash(shots);
     }
 
     exportBatch = null;
@@ -635,14 +690,15 @@ if (!singleInstanceLock) {
 
   app.whenReady().then(async () => {
     await loadPreferences();
-    await syncStartupShortcut();
+    // A locked or read-only Startup folder must not keep the app from starting.
+    await syncStartupShortcut().catch((error) => console.error('Could not update the startup shortcut:', error));
     createTray();
     if (!startInTray) {
       createWindow();
     }
 
     ipcMain.handle('capture-screenshot', async () => {
-      return captureFromClipboard();
+      return startCapture();
     });
 
     ipcMain.handle('paste-all', async () => {
@@ -650,9 +706,8 @@ if (!singleInstanceLock) {
       return true;
     });
 
+    // Only empties ShotTray's list; the screenshot files themselves stay where they are.
     ipcMain.handle('clear-queue', async () => {
-      const items = [...queue];
-      await deleteFilesForItems(items);
       queue.length = 0;
       collecting = false;
       activeBatch = null;
@@ -671,29 +726,37 @@ if (!singleInstanceLock) {
 
     ipcMain.handle('set-after-paste-behavior', async (_event, behavior: AfterPasteBehavior) => {
       afterPasteBehavior = behavior;
-      void savePreferences();
+      persistPreferences();
       sendState();
       return true;
     });
 
     ipcMain.handle('set-language', async (_event, nextLanguage: Language) => {
       language = nextLanguage;
-      void savePreferences();
+      persistPreferences();
       sendState();
       return true;
     });
 
     ipcMain.handle('set-launch-at-startup', async (_event, enabled: boolean) => {
+      const previous = launchAtStartup;
       launchAtStartup = enabled;
-      await syncStartupShortcut();
-      void savePreferences();
+      try {
+        await syncStartupShortcut();
+      } catch (error) {
+        console.error('Could not update the startup shortcut:', error);
+        launchAtStartup = previous;
+        sendState();
+        return false;
+      }
+      persistPreferences();
       sendState();
       return true;
     });
 
     ipcMain.handle('set-auto-to-tray', async (_event, enabled: boolean) => {
       autoToTray = enabled;
-      void savePreferences();
+      persistPreferences();
       sendState();
       return true;
     });
@@ -704,28 +767,21 @@ if (!singleInstanceLock) {
       return true;
     });
 
-    ipcMain.handle('get-state', async () => ({
-      collecting,
-      activeBatch,
-      exportBatch,
-      afterPasteBehavior,
-      language,
-      launchAtStartup,
-      autoToTray,
-      queue
-    }));
+    ipcMain.handle('get-state', async () => currentState());
 
-    globalShortcut.register('Alt+Shift+S', () => {
-      void captureFromClipboard();
-    });
-
-    globalShortcut.register('Alt+Shift+V', () => {
-      void pasteAllImages();
-    });
+    const hotkeys: Array<[string, () => void]> = [
+      ['Alt+Shift+S', () => void startCapture()],
+      ['Alt+Shift+V', () => void pasteAllImages()]
+    ];
+    for (const [accelerator, action] of hotkeys) {
+      // Fails when another program already uses the same keys; the window then says so.
+      if (!globalShortcut.register(accelerator, action)) {
+        unavailableHotkeys.push(accelerator);
+      }
+    }
 
     sendState();
 
-    void primeScreenshotIndex();
     screenshotPoller = setInterval(() => {
       void scanScreenshotFolder();
     }, 120);

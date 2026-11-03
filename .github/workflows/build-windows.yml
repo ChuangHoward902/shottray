@@ -1,0 +1,118 @@
+name: Build Windows app
+
+# Builds ShotTray-<version>-win.exe on GitHub's Windows servers.
+# Download it from the run page: Actions -> newest run -> Artifacts.
+# To publish a release: Actions -> Build Windows app -> Run workflow, tick "release".
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Publish the version in package.json as a GitHub release, with the exe and the CHANGELOG.md notes
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "assets/shottray-preview.png"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # The tests use a fake Electron, so the Electron download is not needed here.
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test
+
+  # Runs next to the tests, not after them, so a failing test never keeps you from getting the exe.
+  app:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      # --publish never: building must not upload anything by itself.
+      - run: npx electron-builder --win portable --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      # The app does not start if one of its files is missing from the package, and tests cannot see that.
+      - name: Check the package has every file the app needs
+        run: |
+          npx @electron/asar list release/win-unpacked/resources/app.asar | Tee-Object asar-list.txt
+          foreach ($file in "dist\main\index.js", "dist\preload\preload.js", "dist\renderer\index.html", "assets\shottray.ico") {
+            if (-not (Select-String -Path asar-list.txt -Pattern ([regex]::Escape($file) + '$') -Quiet)) { throw "Missing from the package: $file" }
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShotTray-win
+          path: release/*.exe
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'workflow_dispatch' && (inputs.release == true || inputs.release == 'true')
+    needs: app
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ShotTray-win
+          path: app
+
+      - name: Write the release notes from CHANGELOG.md
+        run: |
+          node <<'EOF'
+          const fs = require("fs");
+          const version = require("./package.json").version;
+          const section = fs.readFileSync("CHANGELOG.md", "utf8").split(/^## /m).find((part) => part.split(/\r?\n/)[0].trim() === version);
+          if (!section) {
+            throw new Error(`CHANGELOG.md has no "## ${version}" section`);
+          }
+          const notes = [
+            `## ShotTray v${version}`,
+            "",
+            section.slice(section.indexOf("\n") + 1).trim(),
+            "",
+            "### 下載",
+            "",
+            `請下載下方的 ShotTray-${version}-win.exe。`,
+            "",
+          ];
+          fs.writeFileSync("notes.md", notes.join("\n"));
+          fs.appendFileSync(process.env.GITHUB_ENV, `VERSION=${version}\n`);
+          EOF
+
+      # Fails, rather than overwriting anything, if this version was already released.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v$VERSION" app/*.exe --target "$GITHUB_SHA" --title "ShotTray v$VERSION" --notes-file notes.md

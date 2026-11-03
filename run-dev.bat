@@ -13,7 +13,7 @@ if not exist node_modules (
   )
 )
 
-echo Starting AI Screenshot Tool...
+echo Starting ShotTray...
 call cmd /c npm run dev
 
 popd
