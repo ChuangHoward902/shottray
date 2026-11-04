@@ -21,6 +21,8 @@ function makeImage(id, width, height, bytes) {
     isEmpty: () => false,
     getSize: () => ({ width, height }),
     toDataURL: () => `data:image/png;base64,${Buffer.from(`PNG|${id}|${width}x${height}`).toString('base64')}${'A'.repeat(bytes)}`,
+    toBitmap: () => Buffer.from(`${id}|${width}x${height}`.padEnd(64, '.')),
+    toPNG: () => Buffer.from(`PNG|${id}|${width}x${height}`),
     toJPEG: () => Buffer.concat([Buffer.from(`PNG|${id}|${width}x${height}`), Buffer.alloc(bytes, 65)]),
     resize: ({ width: small }) => makeImage(id, small, Math.round((height * small) / width), 0)
   };
@@ -286,4 +288,34 @@ test('the window fits a small screen', async (t) => {
   await app.start();
   assert.equal(app.windows[0].width, 1220);
   assert.equal(app.windows[0].height, 688);
+});
+
+test('a screenshot that only exists on the clipboard is collected', async (t) => {
+  const app = startApp();
+  t.after(app.quit);
+  await app.start();
+  app.clip = { image: makeImage('old-copy', 800, 600, 0) };
+  app.press('Alt+Shift+S');
+  await sleep(600);
+  assert.equal((await app.state()).queue.length, 0, 'the picture already on the clipboard is not a new screenshot');
+  app.clip = { image: makeImage('from-clipboard', 1280, 720, 0) };
+  await sleep(900);
+  const { queue } = await app.state();
+  assert.deepEqual(names(queue), ['from-clipboard']);
+  await pasteAndWait(app);
+  assert.deepEqual(app.pastes, ['from-clipboard']);
+});
+
+test('a screenshot that arrives on the clipboard and as a file is collected once', async (t) => {
+  for (const clipboardFirst of [true, false]) {
+    const app = startApp();
+    await app.start();
+    app.press('Alt+Shift+S');
+    await sleep(300);
+    const copy = () => { app.clip = { image: makeImage('same', 1920, 1080, 0) }; };
+    if (clipboardFirst) { copy(); await sleep(900); app.shoot('same'); } else { app.shoot('same'); await sleep(900); copy(); }
+    await sleep(1000);
+    assert.equal((await app.state()).queue.length, 1, `clipboard first: ${clipboardFirst}`);
+    app.quit();
+  }
 });

@@ -15,11 +15,15 @@ import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
 
 type ShotItem = {
   id: string;
-  filePath: string;
+  // Where the screenshot was saved; null when it only ever existed on the clipboard.
+  filePath: string | null;
+  // Identifies the picture itself, so the clipboard copy and the saved file of one screenshot count once.
+  hash: string;
   // The screenshot file as saved; pasting uses this copy, so it still works after the file is gone.
   png: Buffer;
   // A small preview for the window. Full-size images are never sent to it.
@@ -76,6 +80,9 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let pasting = false;
 let screenshotPoller: NodeJS.Timeout | null = null;
+let clipboardPoller: NodeJS.Timeout | null = null;
+// The picture that was on the clipboard when collecting started (or was last looked at); it is not a new screenshot.
+let lastClipboardHash = '';
 let preferencesLoaded = false;
 let quitting = false;
 const unavailableHotkeys: string[] = [];
@@ -462,6 +469,7 @@ function startCollecting() {
   activeBatch = nextBatchNumber++;
   // Screenshots already in the folder, including ones taken while ShotTray was idle, are not part of the new batch.
   screenshotIndexReady = primeScreenshotIndex();
+  lastClipboardHash = imageHash(clipboard.readImage());
   sendState();
 }
 
@@ -482,21 +490,44 @@ function makeThumbnail(image: NativeImage) {
   return `data:image/jpeg;base64,${preview.toJPEG(80).toString('base64')}`;
 }
 
-async function enqueueScreenshotFile(filePath: string) {
-  const png = await readFile(filePath).catch(() => null);
-  if (!png || !collecting || activeBatch === null) {
+// A fingerprint of the pixels. Empty for no image. `full` hashes every pixel; otherwise only a sample is
+// hashed, which is cheap enough to do while watching the clipboard but is only used to notice that it changed.
+function imageHash(image: NativeImage, full = false) {
+  if (image.isEmpty()) {
+    return '';
+  }
+
+  const { width, height } = image.getSize();
+  const bitmap = image.toBitmap();
+  const hash = createHash('sha1').update(`${width}x${height}:${bitmap.length}:`);
+  if (full || bitmap.length <= 16384) {
+    return hash.update(bitmap).digest('hex');
+  }
+
+  hash.update(bitmap.subarray(0, 8192)).update(bitmap.subarray(bitmap.length - 8192));
+  for (let offset = 8192; offset < bitmap.length - 8192; offset += 4 * 251) {
+    hash.update(bitmap.subarray(offset, offset + 4));
+  }
+  return hash.digest('hex');
+}
+
+// Adds a screenshot to the batch being collected. Returns false when it is not a readable image yet;
+// a picture already in the batch (say its clipboard copy, when the saved file turns up later) is skipped but counts as handled.
+function addScreenshot(image: NativeImage, png: Buffer, filePath: string | null) {
+  if (!collecting || activeBatch === null || image.isEmpty()) {
     return false;
   }
 
-  const image = nativeImage.createFromBuffer(png);
-  if (image.isEmpty()) {
-    return false;
+  const hash = imageHash(image, true);
+  if (queue.some((item) => item.batch === activeBatch && item.hash === hash)) {
+    return true;
   }
 
   const { width, height } = image.getSize();
   queue.unshift({
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     filePath,
+    hash,
     png,
     thumbnailUrl: makeThumbnail(image),
     width,
@@ -509,6 +540,31 @@ async function enqueueScreenshotFile(filePath: string) {
   return true;
 }
 
+async function enqueueScreenshotFile(filePath: string) {
+  const png = await readFile(filePath).catch(() => null);
+  if (!png) {
+    return false;
+  }
+
+  return addScreenshot(nativeImage.createFromBuffer(png), png, filePath);
+}
+
+// Windows puts every screenshot on the clipboard, whether or not the snipping tool also saves it to a file.
+function scanClipboard() {
+  if (!collecting || pasting) {
+    return;
+  }
+
+  const image = clipboard.readImage();
+  const hash = imageHash(image);
+  if (!hash || hash === lastClipboardHash) {
+    return;
+  }
+
+  lastClipboardHash = hash;
+  addScreenshot(image, image.toPNG(), null);
+}
+
 async function startCapture() {
   startCollecting();
   triggerSnippingTool();
@@ -519,6 +575,7 @@ async function startCapture() {
 async function moveFilesToTrash(items: ShotItem[]) {
   await Promise.all(
     items
+      .filter((item): item is ShotItem & { filePath: string } => item.filePath !== null)
       .filter((item) => isManagedScreenshotFile(item.filePath) && existsSync(item.filePath))
       .map((item) => shell.trashItem(item.filePath).catch((error) => console.error('Could not move to the Recycle Bin:', error)))
   );
@@ -786,6 +843,7 @@ if (!singleInstanceLock) {
     screenshotPoller = setInterval(() => {
       void scanScreenshotFolder();
     }, 120);
+    clipboardPoller = setInterval(scanClipboard, 400);
   });
 }
 
@@ -804,6 +862,10 @@ app.on('will-quit', () => {
   if (screenshotPoller) {
     clearInterval(screenshotPoller);
     screenshotPoller = null;
+  }
+  if (clipboardPoller) {
+    clearInterval(clipboardPoller);
+    clipboardPoller = null;
   }
   if (tray) {
     tray.destroy();
