@@ -478,7 +478,8 @@ function stopCollecting() {
 function makeThumbnail(image: NativeImage) {
   const { width } = image.getSize();
   const preview = width > thumbnailWidth ? image.resize({ width: thumbnailWidth, quality: 'good' }) : image;
-  return preview.toDataURL();
+  // JPEG keeps previews small even for busy screenshots, which PNG compresses poorly.
+  return `data:image/jpeg;base64,${preview.toJPEG(80).toString('base64')}`;
 }
 
 async function enqueueScreenshotFile(filePath: string) {

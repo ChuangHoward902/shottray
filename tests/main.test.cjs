@@ -21,6 +21,7 @@ function makeImage(id, width, height, bytes) {
     isEmpty: () => false,
     getSize: () => ({ width, height }),
     toDataURL: () => `data:image/png;base64,${Buffer.from(`PNG|${id}|${width}x${height}`).toString('base64')}${'A'.repeat(bytes)}`,
+    toJPEG: () => Buffer.concat([Buffer.from(`PNG|${id}|${width}x${height}`), Buffer.alloc(bytes, 65)]),
     resize: ({ width: small }) => makeImage(id, small, Math.round((height * small) / width), 0)
   };
 }
